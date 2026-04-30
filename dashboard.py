@@ -1,288 +1,160 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 import seaborn as sns
-import os
 
-st.set_page_config(
-    page_title="E-Commerce Analytics Dashboard",
-    page_icon="📦",
-    layout="wide",
-)
-HIGHLIGHT = '#E63946'
-BASE      = '#457B9D'
-PEAK_H    = [11, 13, 14, 15, 16]
-PEAK_D    = [0, 1, 2]
-C_WD      = '#457B9D'
-C_WE      = '#E63946'
+st.set_page_config(page_title="E-Commerce Dashboard", page_icon="📦", layout="wide")
 
-# Load Data
-BASE_DIR  = os.path.dirname(__file__)
-DATA_PATH = os.path.join(BASE_DIR, 'main_data.csv')
-
+# 2. LOAD & PREPROCESS DATA
 @st.cache_data
-def load_data(path):
-    df = pd.read_csv(path)
-
-    dt_cols = [
-        'order_purchase_timestamp', 'order_approved_at',
-        'order_delivered_carrier_date', 'order_delivered_customer_date',
-        'order_estimated_delivery_date'
+def load_data():
+    df = pd.read_csv('main_data.csv')
+    
+    datetime_columns = [
+        'order_purchase_timestamp',
+        'order_approved_at',
+        'order_delivered_carrier_date'
     ]
-    for c in dt_cols:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c])
+    for col in datetime_columns:
+        df[col] = pd.to_datetime(df[col])
+        
+    df['date'] = df['order_purchase_timestamp'].dt.date
+    
+    df['processing_days'] = (df['order_delivered_carrier_date'] - df['order_approved_at']).dt.total_seconds() / 86400.0
+    df['approved_weekend'] = df['order_approved_at'].dt.dayofweek >= 5
+    df['approval_type'] = df['approved_weekend'].map({True: 'Akhir Pekan', False: 'Hari Kerja'})
+    
+    df = df[(df['processing_days'] >= 0) | (df['processing_days'].isna())]
+    
+    return df
 
-    if 'hour' not in df.columns:
-        df['hour'] = df['order_purchase_timestamp'].dt.hour
-    if 'day_of_week' not in df.columns:
-        df['day_of_week'] = df['order_purchase_timestamp'].dt.day_name()
-    if 'day_num' not in df.columns:
-        df['day_num'] = df['order_purchase_timestamp'].dt.dayofweek
-
-    delivered = df[df['order_status'] == 'delivered'].copy()
-    if 'processing_days' not in delivered.columns:
-        delivered = delivered.dropna(
-            subset=['order_approved_at', 'order_delivered_carrier_date']
-        )
-        delivered['processing_days'] = (
-            delivered['order_delivered_carrier_date'] - delivered['order_approved_at']
-        ).dt.total_seconds() / 86400
-        delivered = delivered[delivered['processing_days'] >= 0]
-
-    if 'approved_weekend' not in delivered.columns:
-        delivered['approved_weekend'] = delivered['order_approved_at'].dt.dayofweek >= 5
-    if 'approval_type' not in delivered.columns:
-        delivered['approval_type'] = delivered['approved_weekend'].map(
-            {True: 'Akhir Pekan', False: 'Hari Kerja'}
-        )
-
-    return df, delivered
-
-orders_2018, delivered = load_data(DATA_PATH)
-
-hourly  = orders_2018.groupby('hour').size().reset_index(name='total_orders')
-daily   = (
-    orders_2018.groupby(['day_num','day_of_week']).size()
-    .reset_index(name='total_orders').sort_values('day_num')
-)
-heatmap_data = orders_2018.groupby(['day_num','hour']).size().unstack(fill_value=0)
-heatmap_data.index = ['Sen','Sel','Rab','Kam','Jum','Sab','Min']
-
-avg_wd      = delivered[~delivered['approved_weekend']]['processing_days'].mean()
-avg_we      = delivered[ delivered['approved_weekend']]['processing_days'].mean()
-overall_avg = delivered['processing_days'].mean()
-diff_pct    = (avg_we - avg_wd) / avg_wd * 100
-
-summary = delivered.groupby('approval_type')['processing_days'].agg(
-    rata_rata='mean', median='median', std='std'
-).reset_index()
-
-peak_hour    = int(hourly.sort_values('total_orders', ascending=False).iloc[0]['hour'])
-best_day     = daily.sort_values('total_orders', ascending=False).iloc[0]
-worst_day    = daily.sort_values('total_orders', ascending=False).iloc[-1]
-peak_hr_val  = int(hourly.sort_values('total_orders', ascending=False).iloc[0]['total_orders'])
-low_hr_val   = int(hourly.sort_values('total_orders').iloc[0]['total_orders'])
-med_wd       = float(summary[summary['approval_type']=='Hari Kerja']['median'].values[0])
-med_we       = float(summary[summary['approval_type']=='Akhir Pekan']['median'].values[0])
-pct_we       = delivered['approved_weekend'].mean() * 100
-
-# ── Header ─────────────────────────────────────────────────────────────────────
-st.title("📦 E-Commerce Analytics Dashboard")
-st.caption("Analisis pola pembelian & merchant processing time · **Tahun 2018**")
-st.divider()
-
-# Metric Cards 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("🛒 Total Order 2018",    f"{orders_2018.shape[0]:,}",  "pesanan")
-c2.metric("🕐 Jam Puncak",          f"{peak_hour:02d}.00 WIB",    "volume tertinggi")
-c3.metric("⏱️ Avg Processing Time", f"{overall_avg:.2f} hari",    "keseluruhan")
-delta_label = f"+{diff_pct:.1f}% vs hari kerja"
-c4.metric("📊 Selisih Akhir Pekan", f"+{diff_pct:.1f}%",          delta_label,
-          delta_color="inverse")
-
-st.divider()
+df = load_data()
 
 
-#  Pertanyaan 1
+# SIDEBAR & FILTER
+st.sidebar.title("📦 Filter Data")
+st.sidebar.markdown("Silakan sesuaikan rentang waktu untuk melihat visualisasi data yang dinamis.")
 
-st.subheader("Pertanyaan 1 — Kapan waktu terbaik untuk kampanye promosi?")
+min_date = df['date'].min()
+max_date = df['date'].max()
 
-fig1, axes = plt.subplots(1, 3, figsize=(20, 5.5))
-fig1.patch.set_facecolor('#ffffff')
-
-day_labels = ['Sen','Sel','Rab','Kam','Jum','Sab','Min']
-colors_day = [HIGHLIGHT if i in PEAK_D else BASE for i in daily['day_num']]
-
-ax = axes[0]
-ax.set_facecolor('#f8f9fa')
-ax.bar(day_labels, daily['total_orders'], color=colors_day,
-       edgecolor='white', linewidth=0.8, width=0.65, zorder=3)
-ax.set_title('Distribusi Order per Hari', fontweight='bold', pad=12, fontsize=12)
-ax.set_xlabel('Hari', labelpad=6, fontsize=10)
-ax.set_ylabel('Jumlah Order', labelpad=6, fontsize=10)
-ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
-ax.spines[['top','right']].set_visible(False)
-ax.yaxis.grid(True, color='#e9ecef', linewidth=0.6, zorder=0)
-ax.set_axisbelow(True)
-for i, val in enumerate(daily['total_orders']):
-    ax.text(i, val + 70, f'{val:,}', ha='center', fontsize=7.5, color='#6c757d')
-
-ax = axes[1]
-ax.set_facecolor('#f8f9fa')
-colors_hour = [HIGHLIGHT if h in PEAK_H else BASE for h in hourly['hour']]
-ax.bar(hourly['hour'], hourly['total_orders'], color=colors_hour,
-       edgecolor='white', linewidth=0.6, zorder=3)
-ax.set_title('Distribusi Order per Jam', fontweight='bold', pad=12, fontsize=12)
-ax.set_xlabel('Jam (WIB)', labelpad=6, fontsize=10)
-ax.set_ylabel('Jumlah Order', labelpad=6, fontsize=10)
-ax.set_xticks(range(0, 24, 2))
-ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
-ax.spines[['top','right']].set_visible(False)
-ax.yaxis.grid(True, color='#e9ecef', linewidth=0.6, zorder=0)
-ax.set_axisbelow(True)
-peak_val = int(hourly[hourly['hour'] == 15]['total_orders'].values[0])
-ax.annotate('Puncak\n13.00–16.00',
-            xy=(15, peak_val), xytext=(19, peak_val - 500),
-            arrowprops=dict(arrowstyle='->', color='#6c757d', lw=1.2),
-            fontsize=8, color=HIGHLIGHT, fontweight='bold')
-
-ax = axes[2]
-sns.heatmap(heatmap_data, ax=ax, cmap='YlOrRd', linewidths=0.25, annot=False,
-            cbar_kws={'label': 'Jumlah Order', 'shrink': 0.8})
-ax.set_title('Heatmap: Hari × Jam', fontweight='bold', pad=12, fontsize=12)
-ax.set_xlabel('Jam', labelpad=6, fontsize=10)
-ax.set_ylabel('')
-ax.set_xticks(range(0, 24, 2))
-ax.set_xticklabels(range(0, 24, 2), fontsize=8)
-ax.tick_params(axis='y', labelsize=9)
-
-plt.tight_layout(pad=2.5)
-st.pyplot(fig1)
-plt.close()
-
-# Insight Pertanyaa 1
-col_a, col_b = st.columns(2)
-with col_a:
-    st.info(f"**📅 Hari Terbaik**\n\n"
-            f"**{best_day['day_of_week']}** mencatat order tertinggi dengan "
-            f"**{int(best_day['total_orders']):,} order**. "
-            f"Senin–Rabu secara konsisten lebih aktif dibanding akhir pekan.")
-    st.warning(f"**📉 Waktu Sepi**\n\n"
-               f"Pukul **03.00–05.00 dini hari** adalah titik terendah "
-               f"(<{low_hr_val:,} order/jam). Akhir pekan turun **25–35%** vs hari kerja.")
-with col_b:
-    st.success(f"**🕐 Jam Puncak**\n\n"
-               f"Pukul **11.00 & 13.00–16.00 WIB** adalah jam tersibuk "
-               f"dengan lebih dari **{peak_hr_val:,} order/jam** di titik tertinggi.")
-    st.info(f"**🌡️ Pola Heatmap**\n\n"
-            f"Zona paling aktif secara konsisten berada di "
-            f"**Senin–Rabu × 11.00–16.00**, mengkonfirmasi kedua dimensi sekaligus.")
-
-st.success(
-    "✅ **Kesimpulan:** "
-    "Waktu terbaik kampanye promosi adalah **Senin–Rabu pukul 11.00–16.00 WIB**. "
-    "Hindari pengeluaran iklan besar pada dini hari (00.00–07.00) dan akhir pekan "
-    "kecuali ada segmen target khusus."
-)
-
-st.divider()
-
-# Pertanyaan 2
-
-st.subheader("Pertanyaan 2 — Apakah processing time 20% lebih lama di akhir pekan?")
-
-fig2, axes2 = plt.subplots(1, 3, figsize=(20, 5.5))
-fig2.patch.set_facecolor('#ffffff')
-
-bar_colors = [C_WD if t == 'Hari Kerja' else C_WE for t in summary['approval_type']]
-bars = axes2[0].bar(summary['approval_type'], summary['rata_rata'],
-                    color=bar_colors, width=0.5, edgecolor='white', linewidth=0.8, zorder=3)
-axes2[0].set_facecolor('#f8f9fa')
-axes2[0].set_title('Rata-rata Processing Time', fontweight='bold', pad=12, fontsize=12)
-axes2[0].set_ylabel('Hari', labelpad=6, fontsize=10)
-axes2[0].set_ylim(0, 4.2)
-axes2[0].spines[['top','right']].set_visible(False)
-axes2[0].yaxis.grid(True, color='#e9ecef', linewidth=0.6, zorder=0)
-axes2[0].set_axisbelow(True)
-for bar, val in zip(bars, summary['rata_rata']):
-    axes2[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.07,
-                  f'{val:.2f} hari', ha='center', fontweight='bold', fontsize=11)
-axes2[0].axhline(avg_wd * 1.2, color='#6c757d', linestyle='--',
-                 linewidth=1.4, label='Threshold +20%')
-axes2[0].legend(fontsize=8.5)
-
-plot_data = [
-    delivered[delivered['approval_type'] == 'Hari Kerja']['processing_days'].clip(upper=15).values,
-    delivered[delivered['approval_type'] == 'Akhir Pekan']['processing_days'].clip(upper=15).values,
-]
-bp = axes2[1].boxplot(plot_data, labels=['Hari Kerja', 'Akhir Pekan'],
-                      patch_artist=True, notch=False,
-                      medianprops=dict(color='white', linewidth=2.5),
-                      whiskerprops=dict(linewidth=1.2),
-                      capprops=dict(linewidth=1.2))
-for patch, c in zip(bp['boxes'], [C_WD, C_WE]):
-    patch.set_facecolor(c); patch.set_alpha(0.85)
-axes2[1].set_facecolor('#f8f9fa')
-axes2[1].set_title('Distribusi Processing Time\n(di-clip pada 15 hari)', fontweight='bold', pad=12, fontsize=12)
-axes2[1].set_ylabel('Hari', labelpad=6, fontsize=10)
-axes2[1].spines[['top','right']].set_visible(False)
-axes2[1].yaxis.grid(True, color='#e9ecef', linewidth=0.6, zorder=0)
-axes2[1].set_axisbelow(True)
-
-count_data   = delivered['approval_type'].value_counts()
-wedge_colors = [C_WD if k == 'Hari Kerja' else C_WE for k in count_data.index]
-wedges, texts, autotexts = axes2[2].pie(
-    count_data.values, labels=count_data.index,
-    autopct='%1.1f%%', colors=wedge_colors,
-    startangle=90, explode=[0, 0.06],
-    wedgeprops=dict(linewidth=1.5, edgecolor='white')
-)
-for at in autotexts:
-    at.set_fontweight('bold'); at.set_fontsize(11)
-axes2[2].set_title('Proporsi Approval\nHari Kerja vs Akhir Pekan', fontweight='bold', pad=12, fontsize=12)
-
-plt.tight_layout(pad=2.5)
-st.pyplot(fig2)
-plt.close()
-
-# Insight Pertanyaan 2
-col_c, col_d = st.columns(2)
-with col_c:
-    insight_fn = st.error if diff_pct > 20 else st.success
-    label_hipotesis = "🚨 Hipotesis Terbukti" if diff_pct > 20 else "✅ Hipotesis Tidak Terbukti"
-    insight_fn(
-        f"**{label_hipotesis}**\n\n"
-        f"Processing time akhir pekan rata-rata **{avg_we:.2f} hari** vs hari kerja "
-        f"**{avg_wd:.2f} hari** — selisih **+{diff_pct:.1f}%**, "
-        f"{'melampaui' if diff_pct > 20 else 'tidak melampaui'} threshold 20%."
+try:
+    start_date, end_date = st.sidebar.date_input(
+        "Pilih Rentang Tanggal Pembelian",
+        value=[min_date, max_date],
+        min_value=min_date,
+        max_value=max_date
     )
-    st.info(
-        f"**📦 Outlier Ekstrem**\n\n"
-        f"Boxplot menunjukkan outlier akhir pekan lebih padat di rentang "
-        f"**6–15 hari**. Kasus keterlambatan ekstrem lebih sering terjadi "
-        f"saat approval jatuh di Sabtu–Minggu."
-    )
-with col_d:
-    st.warning(
-        f"**📊 Perbandingan Median**\n\n"
-        f"Median hari kerja **≈{med_wd:.1f} hari** vs akhir pekan **≈{med_we:.1f} hari**. "
-        f"Gap median besar menunjukkan perlambatan dirasakan mayoritas penjual, "
-        f"bukan hanya outlier."
-    )
+except ValueError:
+    st.error("Silakan pilih rentang tanggal yang valid (tanggal awal dan akhir).")
+    st.stop()
+
+filtered_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+
+
+# DASHBOARD
+st.title("📊 E-Commerce Performance Dashboard")
+st.markdown(f"**Menampilkan data dari: `{start_date.strftime('%d %b %Y')}` hingga `{end_date.strftime('%d %b %Y')}`**")
+st.markdown("---")
+
+if filtered_df.empty:
+    st.warning("Tidak ada data transaksi pada rentang tanggal yang dipilih.")
+    st.stop()
+
+# BAGIAN PERTANYAAN 1
+st.header("Pertanyaan 1: Kapan waktu terbaik untuk menjalankan kampanye promosi?")
+
+fig_q1, ax_q1 = plt.subplots(figsize=(12, 5))
+heatmap_data = filtered_df.groupby(['day_num', 'hour']).size().unstack(fill_value=0)
+
+heatmap_data = heatmap_data.reindex(range(7), fill_value=0)
+hari_labels = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min']
+heatmap_data.index = hari_labels
+
+sns.heatmap(
+    heatmap_data, 
+    ax=ax_q1, 
+    cmap='YlOrRd', 
+    linewidths=0.4, 
+    annot=True, 
+    fmt='d', 
+    annot_kws={'size': 8},
+    cbar_kws={'label': 'Jumlah Order'}
+)
+ax_q1.set_xlabel('Jam (WIB)', fontsize=11)
+ax_q1.set_ylabel('Hari', fontsize=11)
+st.pyplot(fig_q1)
+
+# Temuan Interaktif Q1
+if heatmap_data.values.sum() > 0:
+    max_day_name, max_hour = heatmap_data.stack().idxmax()
+    max_orders = heatmap_data.max().max()
+    total_orders = heatmap_data.values.sum()
+    
     st.success(
-        f"**📐 Skala Dampak**\n\n"
-        f"Hanya **{pct_we:.1f}%** approval terjadi di akhir pekan, namun "
-        f"dampaknya nyata karena volume absolut yang terdampak tetap signifikan."
+        f"**Temuan Singkat:** Dari total **{total_orders:,}** data pesanan, waktu terbaik pelanggan melakukan pembelian adalah pada hari **{max_day_name}**, "
+        f"tepatnya pada pukul **{max_hour}:00 WIB** (mencapai puncak **{max_orders:,} pesanan**). Menjadwalkan promosi di waktu ini akan menghasilkan tingkat konversi yang paling optimal."
     )
+else:
+    st.info("Belum cukup data pesanan untuk menemukan waktu puncak pada rentang tanggal ini.")
 
-st.warning(
-    f"✅ **Kesimpulan:** "
-    f"Hipotesis **terbukti** — Merchant Processing Time rata-rata "
-    f"**{diff_pct:.1f}% lebih lama** saat approval di akhir pekan "
-    f"({avg_we:.2f} hari vs {avg_wd:.2f} hari). Perlu SLA khusus akhir pekan "
-    f"dan integrasi jadwal penjemputan kurir Sabtu–Minggu."
-)
-st.divider()
-st.caption("© 2024 AndriSaputra_CDCC282D6Y1137 · E-Commerce Analytics Dashboard")
+st.markdown("---")
+
+# BAGIAN PERTANYAAN 2
+st.header("Pertanyaan 2: Berapa rata-rata hari proses penjual (Hari Kerja vs Akhir Pekan)?")
+
+delivered_df = filtered_df[filtered_df['order_status'] == 'delivered'].dropna(subset=['processing_days'])
+
+if not delivered_df.empty:
+    summary_q2 = delivered_df.groupby('approval_type')['processing_days'].mean().reset_index()
+    
+    try:
+        avg_wkday = summary_q2[summary_q2['approval_type'] == 'Hari Kerja']['processing_days'].values[0]
+    except IndexError:
+        avg_wkday = 0
+        
+    try:
+        avg_wkend = summary_q2[summary_q2['approval_type'] == 'Akhir Pekan']['processing_days'].values[0]
+    except IndexError:
+        avg_wkend = 0
+
+    fig_q2, ax_q2 = plt.subplots(figsize=(8, 4))
+    sns.barplot(
+        x='approval_type', 
+        y='processing_days', 
+        data=summary_q2, 
+        palette={'Hari Kerja': '#457B9D', 'Akhir Pekan': '#E63946'},
+        ax=ax_q2
+    )
+    ax_q2.set_xlabel('Waktu Approval', fontsize=11)
+    ax_q2.set_ylabel('Rata-rata Waktu Proses (Hari)', fontsize=11)
+    
+    for p in ax_q2.patches:
+        ax_q2.annotate(format(p.get_height(), '.2f'), 
+                       (p.get_x() + p.get_width() / 2., p.get_height()), 
+                       ha = 'center', va = 'center', 
+                       xytext = (0, 9), 
+                       textcoords = 'offset points')
+    
+    st.pyplot(fig_q2)
+
+    # Temuan Interaktif Q2 
+    if avg_wkday > 0 and avg_wkend > 0:
+        selisih = ((avg_wkend - avg_wkday) / avg_wkday) * 100
+        status_selisih = "lebih lambat" if selisih > 0 else "lebih cepat"
+        
+        st.success(
+            f"**Temuan Singkat:** Dari **{len(delivered_df):,}** data paket sukses, rata-rata penjual membutuhkan **{avg_wkday:.2f} hari** di Hari Kerja "
+            f"dan **{avg_wkend:.2f} hari** di Akhir Pekan untuk menyerahkan paket ke kurir. Hal ini menjawab pertanyaan bisnis bahwa proses penyerahan paket menjadi **{abs(selisih):.1f}% {status_selisih}** jika transaksi disetujui pada akhir pekan."
+        )
+    else:
+        st.info("Penyebaran data Hari Kerja atau Akhir Pekan tidak lengkap untuk diperbandingkan pada rentang ini.")
+else:
+    st.warning("Tidak ada data pesanan berstatus 'delivered' dengan kelengkapan waktu pada rentang tanggal ini.")
+
+
+# FOOTER
+
+st.markdown("<br><br>", unsafe_allow_html=True)
+st.markdown("---")
+st.markdown("<p style='text-align: center; color: gray;'>© Copyright AndriSaputra_CDCC282D6Y1137</p>", unsafe_allow_html=True)
